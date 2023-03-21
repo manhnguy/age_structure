@@ -1,0 +1,189 @@
+---
+title: "Age structure for commune level"
+author: "manh"
+date: '2023-03-20'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Introduction
+
+The code below uses raster-based modelled data from WorldPop on age structure to
+generate a data frame of age structure by commune level
+
+## Local folders
+
+```{r folders}
+gadm_data_folder <- "~/OneDrive - Oxford University Clinical Research Unit/DART/GADM/"
+wpop_data_folder <- "/Volumes/special$/DART/GADM\ age\ structure" ## I assumed you have data somewhere else
+```
+
+## Packages
+
+Packages needed for the analysis:
+
+```{r}
+needed_package <- c("dplyr", "tidyr", "purrr", "terra", "stringr", "sf", "parallel", "magrittr")
+```
+
+Installing the packages that are not already installed:
+
+```{r}
+to_install <- needed_package[which(!needed_package %in% installed.packages()[, "Package"])]
+if (length(to_install)) install.packages(to_install)
+```
+
+Loading the packages:
+
+```{r message = FALSE}
+dev_null <- sapply(needed_package, function(libname) library(libname, character.only = TRUE))
+rm(dev_null)
+```
+
+
+## Downloading commune polygons data from GADM
+
+GADM root URL:
+
+```{r}
+gadm <- "https://geodata.ucdavis.edu/gadm/"
+```
+
+Version and format:
+
+```{r}
+vers_form <- "gadm3.6/Rsf/"
+```
+
+File:
+
+```{r}
+file_name <- "gadm36_VNM_3_sf.rds"
+```
+
+Creating the local folder structure if it does not exist:
+
+```{r}
+local_folder <- paste0(gadm_data_folder, vers_form)
+if (!dir.exists(local_folder)) dir.create(local_folder, recursive = TRUE)
+```
+
+Downloading the data if not already available locally:
+
+```{r}
+local_file <- paste0(local_folder, file_name)
+if (!file.exists(local_file)) download.file(paste0(gadm, vers_form, file_name), local_file)
+```
+
+Loading the polygons data.
+
+```{r}
+communes <- local_file %>%
+  readRDS() %>%
+  mutate(
+    NAME_1 = stringi::stri_trans_general(NAME_1, "any-ascii"),
+    NAME_2 = stringi::stri_trans_general(NAME_2, "any-ascii")
+  ) %>%
+  mutate(commune = paste0(NAME_1, ",", NAME_2, ",", VARNAME_3)) %>% ## a commune is identified with province, district and commune
+  st_set_crs(4326)
+```
+
+Checking the map of the provinces polygons:
+
+```{r}
+communes %>%
+  st_geometry() %>%
+  plot()
+```
+
+All the combinations of years, ages and gender:
+
+```{r}
+ages <- c(0, 1, seq(5, 80, 5))
+
+combinations <- expand_grid(
+  years = 2000:2020,
+  ages = ages,
+  sexes = c("f", "m")
+)
+```
+
+generate age structure commune level 
+```{r}
+commune2vect <- function(commune_name) {
+  communes %>%
+    filter(commune == commune_name) %>%
+    vect()
+}
+```
+A function that crops and masks a `SpatRaster` object `rst` with a `SpatVector`
+object `pol`:
+
+```{r}
+crop_mask <- function(rst, pol) {
+  rst %>%
+    crop(pol) %>%
+    mask(pol)
+}
+```
+
+A function that extracts the number of people of a raster `rst` inside a polygon
+`pol`:
+
+```{r}
+nb_people <- function(rst, pol) {
+  crop_mask(rst, pol) %>%
+    values() %>%
+    sum(na.rm = TRUE)
+}
+```
+A function that converts a TIFF file (i.e. number of people for a given year,
+age, and sex) into a data frame with number of people per commune:
+
+```{r}
+tif2df <- function(tif_file) {
+  tmp <- first(str_split(str_remove(tif_file, ".tif"), "_"))
+  tif_file %>%
+    paste0(wpop_data_folder, "/", .) %>%
+    rast() %>%
+    map_dbl(commune_vect_list, nb_people, rst = .) %>%
+    tibble(year = tmp[4], commune = commune_names, sex = tmp[2], age = tmp[3], n = .)
+}
+```
+
+The names of the each commune (follow by province and district names)
+
+```{r}
+commune_names <- communes$commune
+```
+
+A list of provinces polygons as `SpatVector`:
+
+```{r}
+commune_vect_list <- map(commune_names, commune2vect)
+```
+
+ The world population data is stored on OUCRU shared folder. These functions takes quite a while to run might be of connection issues. I did not put below code in a function and run the code for a numbers of .tif files instead
+ 
+```{r}
+list_file <- dir(wpop_data_folder)
+
+age_data <- list_file[1] %>%
+  mclapply(tif2df, mc.cores = detectCores() - 1) %>%
+  bind_rows() %>%
+  mutate(
+    age_class = hash[age],
+    sex = c(f = "female", m = "male")[sex],
+    age = as.integer(age)
+  )
+
+saveRDS(age_data, "~/OneDrive - Oxford University Clinical Research Unit/DART/WorldPop/processed/age structure/Vietnam/age_data_commune/age_data_commune_1")
+```
